@@ -1,0 +1,243 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Template with ALB, ASG, and EC2 instances configured to download from S3
+
+Parameters:
+  VPCID:
+    Type: String
+    Description: The ID of the VPC
+  PublicSubnet1ID:
+    Type: String
+    Description: ID of the first public subnet
+  PublicSubnet2ID:
+    Type: String
+    Description: ID of the second public subnet
+  PrivateSubnet1ID:
+    Type: String
+    Description: ID of the first private subnet
+  PrivateSubnet2ID:
+    Type: String
+    Description: ID of the second private subnet
+  S3BucketName:
+    Type: String
+    Description: Name of the S3 bucket containing the file
+  DomainName:
+    Type: String
+    Default: test.com
+    Description: The domain name for the hosted zone and certificate\
+  ImageId:
+    Type: String
+    Description: The EC2 instance AMI ID
+  InstanceType:
+    Type: String
+    Default: t2.micro
+    Description: EC2 instance type
+  SSHKeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+
+
+Resources:
+  HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref DomainName
+
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      ValidationMethod: DNS
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB Security Group
+      VpcId: !Ref VPCID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+        - !Ref PublicSubnet1ID
+        - !Ref PublicSubnet2ID
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref ALB
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref MyCertificate
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VPCID
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /belong-test.html
+      HealthCheckPort: 80
+      HealthCheckProtocol: HTTP
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher:
+        HttpCode: '200'
+
+  AppServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: EC2 Security Group
+      VpcId: !Ref VPCID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+      # All public subnets instances access the httpd server
+        - IpProtocol: tcp  # Allows all protocols
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref PrivateSubnet1ID
+        - IpProtocol: tcp  # Allows all protocols
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref PrivateSubnet2ID
+
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ec2.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ['s3:GetObject']
+                Resource: !Sub 'arn:aws:s3:::belong-coding-challenge/belong-test.html'
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2Role
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: MyLaunchTemplate
+      LaunchTemplateData:
+        IamInstanceProfile:
+          Name: !Ref EC2InstanceProfile
+        ImageId: !Ref ImageId
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref SSHKeyName
+        SecurityGroupIds:
+          - !Ref AppServerSecurityGroup
+        Monitoring:
+          Enabled: true  # Enable detailed monitoring
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            yum update -y
+            yum install -y httpd
+            yum install -y awslogs
+            cat <<EOF > /etc/awslogs/awslogs.conf
+            [general]
+            state_file = /var/lib/awslogs/agent-state
+            [/var/log/messages]
+            file = /var/log/messages
+            log_group_name = /var/log/messages
+            log_stream_name = {instance_id}
+            datetime_format = %b %d %H:%M:%S
+            EOF
+
+            systemctl start awslogsd
+            systemctl enable awslogsd
+
+            service httpd start
+            chkconfig httpd on
+            echo "Australia/Sydney" > /etc/timezone
+            ln -sf /usr/share/zoneinfo/Australia/Sydney /etc/localtime
+            aws s3 cp s3://belong-coding-challenge/belong-test.html /var/www/html/belong-test.html
+            service httpd restart
+            yum install amazon-cloudwatch-agent
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet1ID
+        - !Ref PrivateSubnet2ID
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: 1
+      MaxSize: 2
+      DesiredCapacity: 2
+      TargetGroupARNs:
+        - !Ref ALBTargetGroup
+
+### Add bastion host #############
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: CloudWatchMetricsAndLogsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - Ref: InstanceRole
+
+  BastionHost:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      InstanceType: t2.micro
+      ImageId: !Ref ImageId
+      SubnetId: !Ref PublicSubnetID
+      IamInstanceProfile: !Ref InstanceProfile
+      Tags:
+        Key: "Name"
+        Value: "BastionHost"

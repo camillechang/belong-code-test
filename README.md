@@ -27,5 +27,10 @@ This template creates the resources required to host and manage the application:
 - Auto Scaling Group (ASG):
   Manages the scaling and health of EC2 instances in the private subnet. Works in conjunction with the Application Load Balancer for traffic distribution and health checks.
 - Application Load Balancer (ALB): Routes traffic to the EC2 instances and performs health checks.
+#### 3. Deploy code via aws cli ####
+- `aws cloudformation deploy --template-file cloudformation/network/network.yaml --stack-name belong-network --parameter-overrides file://cloudformation/network/prod.yaml --capabilities CAPABILITY_NAMED_IAM CAPABILITY_NAMED_IAM --region ap-southeast-2
+`
+- `aws cloudformation deploy --template-file cloudformation/app/app.yaml --stack-name belong-app --parameter-overrides file://cloudformation/app/prod.yaml --capabilities CAPABILITY_NAMED_IAM CAPABILITY_NAMED_IAM --region ap-southeast-2
+`
 ### TODO ###
 - ADD CloudTrail, aws inspector and guardduty
